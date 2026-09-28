@@ -1,14 +1,16 @@
 EDF6 Enemy HP
 =============
 
-Barra con la vida actual / maxima y el porcentaje del ultimo enemigo que
-golpeaste. Aparece al pegar, se va a los 5 segundos sin golpes (1,5 si lo
-mataste) y F3 la oculta o la vuelve a mostrar.
+Tarjeta con la vida del ultimo enemigo que golpeaste: porcentaje, barra,
+vida actual / maxima, tu DPS de los ultimos 5 segundos (solo tu dano), el
+tiempo estimado para matarlo a ese ritmo y el ultimo golpe. Aparece al pegar,
+se va a los 5 segundos sin golpes (1,5 si lo mataste) y F3 la oculta o la
+vuelve a mostrar.
 
 REQUISITOS
 ----------
   - EDFModLoader: https://github.com/BlueAmulet/EDFModLoader
-  - EDF6 Compendium v0.2.0 o mas nuevo:
+  - EDF6 Compendium v0.3.0 o mas nuevo:
     https://github.com/Divineridh/EDF6-Compendium/releases
 
 Este mod es un modulo del Compendium: el Compendium es el que dibuja en
@@ -35,7 +37,7 @@ EDF6.exe:
   - "modulos: registrado Enemy HP"       el Compendium lo acepto
   - "hp enemigos: enganchado EDF.dll..."  encontro la funcion de dano
 
-Si falta la primera, revisar que el Compendium sea v0.2.0 o mas nuevo. Si falta
+Si falta la primera, revisar que el Compendium sea v0.3.0 o mas nuevo. Si falta
 la segunda, la linea anterior dice que no coincidio (puede pasar si una
 actualizacion del juego cambio esa funcion).
 

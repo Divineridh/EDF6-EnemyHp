@@ -1,13 +1,17 @@
 # EDF6 Enemy HP
 
-Barra con la vida actual / máxima y el porcentaje del último enemigo que golpeaste en Earth Defense
-Force 6. Aparece al pegar, se va a los 5 segundos sin golpes (1,5 s si lo mataste) y F3 la apaga.
+Tarjeta con la vida del último enemigo que golpeaste en Earth Defense Force 6: porcentaje, barra de
+10 segmentos que pasa de verde a ámbar y rojo, vida actual / máxima, tu DPS de los últimos 5
+segundos, el tiempo estimado para matarlo a ese ritmo y el último golpe. El DPS cuenta solo tu daño,
+no el de aliados ni NPC. Aparece al pegar, se va a los 5 segundos sin golpes (1,5 s si lo mataste)
+y F3 la apaga.
 
 ## Requisito: el Compendium
 
 Es un módulo de [EDF6-Compendium](https://github.com/Divineridh/EDF6-Compendium): no trae hook de
 dibujado ni de teclado propio, sino que se registra en el Compendium por
-`Edf6Overlay_Register` (contrato en `src/edf6_overlay_api.h`, versión 1). El Compendium le avisa
+`Edf6Overlay_Register` (contrato en `src/edf6_overlay_api.h`, versión 2: necesita el Compendium
+0.3.0 o más nuevo, que suma texto con fuente y espaciado). El Compendium le avisa
 cuando apretás la tecla —por los mismos tres caminos que usa para F1— y le presta una superficie
 para dibujar en cada frame.
 
