@@ -38,6 +38,10 @@ constexpr int kMaxHpSamples = 32;
 constexpr int kMinSamplesToCompare = 5;
 constexpr float kExceptionalHpRatio = 4.0f;
 constexpr ULONGLONG kExceptionalAfterMs = 4000;
+constexpr ULONGLONG kVisibleAfterSpotMs = 30000;
+constexpr int32_t kSpotParamTargetOffset = 0x40;
+constexpr const char kSpotEffectRtti[] = ".?AVSpotEffect@@";
+constexpr ptrdiff_t kMaxVtableLoadIntoCtor = 0x100;
 constexpr ULONGLONG kTrailHoldMs = 500;
 constexpr ULONGLONG kTrailShrinkMs = 300;
 
@@ -62,6 +66,10 @@ const uint8_t kReadsTargetTeam[] = {0x4C, 0x63, 0x87, 0x14, 0x03, 0x00, 0x00};
 const uint8_t kExpectedPrologue[] = {0x48, 0x8B, 0xC4};
 
 using ApplyDamageFn = void(__fastcall *)(uintptr_t target, uintptr_t damageInfo);
+// SpotEffect's constructor, the object a ping (the "spot" key) creates. Only the first two
+// arguments are used; the rest are forwarded untouched, including stack slots it may not have.
+using SpotEffectCtorFn = uintptr_t(__fastcall *)(uintptr_t self, uintptr_t initParam, uintptr_t a3, uintptr_t a4,
+                                                uintptr_t a5, uintptr_t a6, uintptr_t a7, uintptr_t a8);
 
 struct Hit {
     ULONGLONG at = 0;
@@ -76,6 +84,7 @@ struct TrackedEnemy {
     ULONGLONG firstPlayerHitAt = 0;
     ULONGLONG lastPlayerHitAt = 0;
     ULONGLONG killedAt = 0;
+    ULONGLONG spottedUntil = 0;
     float lastPlayerHit = 0.0f;
     float playerDamage = 0.0f;
     float trailHp = 0.0f;
@@ -91,6 +100,7 @@ struct Tracker {
 };
 
 ApplyDamageFn originalApplyDamage = nullptr;
+SpotEffectCtorFn originalSpotEffectCtor = nullptr;
 int32_t hpOffset = 0;
 int32_t maxHpOffset = 0;
 std::mutex trackedMutex;
@@ -252,19 +262,72 @@ void __fastcall HookedApplyDamage(uintptr_t target, uintptr_t damageInfo) {
     }
 }
 
-bool TextSection(HMODULE module, const uint8_t **start, size_t *size) {
+struct SpottedEnemy {
+    uintptr_t target = 0;
+    float hp = 0.0f;
+    float maxHp = 0.0f;
+};
+
+// The game is building the spot around this enemy, so its object is alive; still guarded, since
+// a ping can also land on things that aren't characters.
+SpottedEnemy ReadSpottedEnemy(uintptr_t initParam) {
+    SpottedEnemy spotted;
+    __try {
+        const uintptr_t target = *reinterpret_cast<const uintptr_t *>(initParam + kSpotParamTargetOffset);
+        if (target && ReadInt(target, kTargetTeamOffset) == kEnemyTeam) {
+            spotted.target = target;
+            spotted.hp = ReadFloat(target, hpOffset);
+            spotted.maxHp = ReadFloat(target, maxHpOffset);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        spotted = SpottedEnemy();
+    }
+    return spotted;
+}
+
+void OnSpotted(const SpottedEnemy &spotted) {
+    if (!spotted.target || spotted.hp <= 0.0f || spotted.maxHp <= 0.0f) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(trackedMutex);
+    TrackedEnemy *enemy = FindTracked(spotted.target);
+    if (!enemy || enemy->hp <= 0.0f) {
+        enemy = enemy ? enemy : OldestSlot();
+        *enemy = TrackedEnemy();
+        enemy->target = spotted.target;
+    }
+    const ULONGLONG now = GetTickCount64();
+    enemy->hp = spotted.hp;
+    enemy->maxHp = spotted.maxHp;
+    enemy->lastUpdate = now;
+    enemy->spottedUntil = now + kVisibleAfterSpotMs;
+    enemy->exceptional = true;
+}
+
+uintptr_t __fastcall HookedSpotEffectCtor(uintptr_t self, uintptr_t initParam, uintptr_t a3, uintptr_t a4,
+                                          uintptr_t a5, uintptr_t a6, uintptr_t a7, uintptr_t a8) {
+    OnSpotted(ReadSpottedEnemy(initParam));
+    return originalSpotEffectCtor(self, initParam, a3, a4, a5, a6, a7, a8);
+}
+
+bool FindSection(HMODULE module, const char *name, const uint8_t **start, size_t *size) {
     auto base = reinterpret_cast<const uint8_t *>(module);
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
     const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    const size_t length = strlen(name);
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++, section++) {
-        if (memcmp(section->Name, ".text", 5) == 0) {
+        if (memcmp(section->Name, name, length) == 0 && (length == 8 || section->Name[length] == '\0')) {
             *start = base + section->VirtualAddress;
             *size = section->Misc.VirtualSize;
             return true;
         }
     }
     return false;
+}
+
+bool TextSection(HMODULE module, const uint8_t **start, size_t *size) {
+    return FindSection(module, ".text", start, size);
 }
 
 const uint8_t *FindPattern(const uint8_t *start, size_t size, const uint8_t *pattern, const char *mask) {
@@ -328,6 +391,97 @@ const uint8_t *LocateApplyDamage(HMODULE gameDll) {
     return function;
 }
 
+// MSVC RTTI: the type descriptor keeps the mangled class name 0x10 bytes in, the complete object
+// locator of the primary vtable points at the descriptor, and the vtable starts right after the
+// pointer to its locator.
+const uint8_t *LocateVtable(HMODULE module, const char *mangledName) {
+    auto base = reinterpret_cast<const uint8_t *>(module);
+    const uint8_t *data = nullptr;
+    const uint8_t *rdata = nullptr;
+    size_t dataSize = 0;
+    size_t rdataSize = 0;
+    if (!FindSection(module, ".data", &data, &dataSize) || !FindSection(module, ".rdata", &rdata, &rdataSize)) {
+        return nullptr;
+    }
+    const size_t nameLength = strlen(mangledName) + 1;
+    const uint8_t *name = nullptr;
+    for (const uint8_t *p = data; p + nameLength <= data + dataSize && !name; p++) {
+        if (memcmp(p, mangledName, nameLength) == 0) {
+            name = p;
+        }
+    }
+    if (!name) {
+        return nullptr;
+    }
+    const uint32_t descriptorRva = static_cast<uint32_t>(name - 0x10 - base);
+    const uint8_t *locator = nullptr;
+    for (const uint8_t *p = rdata; p + 24 <= rdata + rdataSize && !locator; p += 4) {
+        const uint32_t *col = reinterpret_cast<const uint32_t *>(p);
+        if (col[0] == 1 && col[1] == 0 && col[3] == descriptorRva && col[5] == static_cast<uint32_t>(p - base)) {
+            locator = p;
+        }
+    }
+    if (!locator) {
+        return nullptr;
+    }
+    for (const uint8_t *p = rdata; p + 8 <= rdata + rdataSize; p += 8) {
+        if (*reinterpret_cast<const uintptr_t *>(p) == reinterpret_cast<uintptr_t>(locator)) {
+            return p + 8;
+        }
+    }
+    return nullptr;
+}
+
+// The constructor is the function that stores the vtable into a new object: find the
+// rip-relative lea that loads it and take the function around it.
+const uint8_t *LocateSpotEffectCtor(HMODULE gameDll) {
+    const uint8_t *vtable = LocateVtable(gameDll, kSpotEffectRtti);
+    if (!vtable) {
+        Log("SpotEffect vtable not found; pings won't show the big card");
+        return nullptr;
+    }
+    const uint8_t *text = nullptr;
+    size_t textSize = 0;
+    if (!TextSection(gameDll, &text, &textSize)) {
+        return nullptr;
+    }
+    for (const uint8_t *p = text; p + 7 <= text + textSize; p++) {
+        if ((p[0] != 0x48 && p[0] != 0x4C) || p[1] != 0x8D || (p[2] & 0xC7) != 0x05) {
+            continue;
+        }
+        if (p + 7 + *reinterpret_cast<const int32_t *>(p + 3) != vtable) {
+            continue;
+        }
+        DWORD64 imageBase = 0;
+        PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(p), &imageBase, nullptr);
+        if (!entry) {
+            continue;
+        }
+        const uint8_t *function = reinterpret_cast<const uint8_t *>(imageBase + entry->BeginAddress);
+        if (p - function <= kMaxVtableLoadIntoCtor) {
+            return function;
+        }
+    }
+    Log("SpotEffect constructor not found; pings won't show the big card");
+    return nullptr;
+}
+
+void HookSpotEffect(HMODULE gameDll) {
+    const uint8_t *function = LocateSpotEffectCtor(gameDll);
+    if (!function) {
+        return;
+    }
+    void *target = const_cast<uint8_t *>(function);
+    if (MH_CreateHook(target, reinterpret_cast<void *>(&HookedSpotEffectCtor),
+                      reinterpret_cast<void **>(&originalSpotEffectCtor)) != MH_OK ||
+        MH_EnableHook(target) != MH_OK) {
+        Log("couldn't hook the SpotEffect constructor");
+        return;
+    }
+    LogF("pings hooked at EDF.dll+0x%llX",
+         static_cast<unsigned long long>(function - reinterpret_cast<const uint8_t *>(gameDll)));
+}
+
 bool HookDamage() {
     HMODULE gameDll = nullptr;
     for (DWORD waited = 0; !(gameDll = GetModuleHandleA("EDF.dll")) && waited < kWaitForGameDllMs; waited += 100) {
@@ -356,15 +510,20 @@ bool HookDamage() {
     LogF("enganchado EDF.dll+0x%llX, vida en +0x%X, maxima en +0x%X",
          static_cast<unsigned long long>(function - reinterpret_cast<const uint8_t *>(gameDll)), hpOffset,
          maxHpOffset);
+    HookSpotEffect(gameDll);
     return true;
 }
 
+// A spotted enemy stays up for the whole spot even without hits; its death ends it like any
+// other kill.
 bool Visible(const TrackedEnemy &enemy, ULONGLONG now) {
-    if (!enemy.target || !enemy.firstPlayerHitAt) {
+    if (!enemy.target || (!enemy.firstPlayerHitAt && !enemy.spottedUntil)) {
         return false;
     }
-    const ULONGLONG window = enemy.hp <= 0.0f ? kVisibleAfterKillMs : kVisibleAfterHitMs;
-    return now - enemy.lastUpdate < window;
+    if (enemy.hp <= 0.0f) {
+        return now - enemy.lastUpdate < kVisibleAfterKillMs;
+    }
+    return now - enemy.lastUpdate < kVisibleAfterHitMs || now < enemy.spottedUntil;
 }
 
 int VisibleEnemies(TrackedEnemy *out, ULONGLONG now) {
@@ -454,6 +613,9 @@ std::string TimeLeft(float seconds) {
 }
 
 std::string KillSummary(const TrackedEnemy &enemy) {
+    if (!enemy.firstPlayerHitAt || enemy.killedAt < enemy.firstPlayerHitAt) {
+        return std::string();
+    }
     const float seconds = (float)(enemy.killedAt - enemy.firstPlayerHitAt) / 1000.0f;
     char buf[64];
     if (seconds < 1.0f) {

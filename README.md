@@ -11,6 +11,10 @@ Un enemigo excepcional pasa a una tarjeta detallada arriba: barra de 10 segmento
 4 veces o más la mediana de los últimos 32 enemigos que golpeaste, o si lleva más de 4 segundos
 aguantando tus golpes. Una vez excepcional, queda así.
 
+Pingear un enemigo (la tecla de "spot", Q por defecto) lo pasa a la tarjeta detallada durante 30
+segundos aunque no le pegues; cada ping renueva el plazo y la muerte lo corta. La vida sigue al día
+con el daño de cualquiera, aliados incluidos.
+
 El DPS cuenta solo tu daño, no el de aliados ni NPC. La franja clara de la barra es el daño reciente:
 se acumula mientras disparás y se achica medio segundo después de que parás.
 
@@ -53,11 +57,26 @@ enemigo ya liberado.
 `tools/hpscan.py` es la herramienta con la que se encontró: diff de memoria por daño conocido y
 breakpoints de hardware de escritura y ejecución.
 
+## Cómo se entera de un ping
+
+El juego llama "spot" al ping: crea un objeto `SpotEffect` (los tres círculos son `SpotCircle.dds`)
+cuyo `InitParam` trae el enemigo en `+0x40`. Esta DLL engancha el constructor de `SpotEffect` (hoy
+`EDF.dll+0x3047c0`) y, si el objetivo es del equipo enemigo, lo marca por 30 segundos. La vida se lee
+ahí mismo, mientras el juego construye el spot alrededor de ese enemigo.
+
+Tampoco se busca por dirección: se parte del RTTI (`.?AVSpotEffect@@` → type descriptor → complete
+object locator → vtable), se busca el `lea` que carga esa vtable y se toma la función que lo
+contiene, que es el constructor. Si algo no coincide, lo dice en el log y el contador sigue sin
+pings.
+
+Se encontró con `hpscan.py ping_watch` (fotos del enemigo antes y después del ping, para separar lo
+que se mueve solo), el RTTI de `EDF.dll` y `hpscan.py trace_exec` sobre el constructor.
+
 ## Diagnóstico
 
 Una vez registrado, todo va a `Compendium.log` con el prefijo `hp enemigos:`. La línea
-`modulos: registrado Enemy HP` confirma que el Compendium lo aceptó, y `enganchado EDF.dll+0x...`
-que encontró la función de daño.
+`modulos: registrado Enemy HP` confirma que el Compendium lo aceptó, `enganchado EDF.dll+0x...`
+que encontró la función de daño, y `pings hooked at EDF.dll+0x...` que encontró la de los pings.
 
 ## Compilar
 

@@ -9,6 +9,10 @@ Los enemigos excepcionales (mucha mas vida que lo que venis peleando, o que
 aguantan mas de 4 segundos) tienen una tarjeta grande arriba, con tu DPS
 (solo tu dano) y el tiempo estimado para matarlo.
 
+Pingear un enemigo (Q por defecto) lo pone en la tarjeta grande durante 30
+segundos, aunque no le pegues. Pingearlo de nuevo renueva el plazo, y si muere
+la tarjeta se va.
+
 F3 oculta o vuelve a mostrar todo.
 
 REQUISITOS
@@ -40,6 +44,7 @@ EDF6.exe:
 
   - "modulos: registrado Enemy HP"       el Compendium lo acepto
   - "hp enemigos: enganchado EDF.dll..."  encontro la funcion de dano
+  - "hp enemigos: pings hooked at ..."    encontro la de los pings
 
 Si falta la primera, revisar que el Compendium sea v0.3.0 o mas nuevo. Si falta
 la segunda, la linea anterior dice que no coincidio (puede pasar si una
