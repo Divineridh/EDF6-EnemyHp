@@ -1,106 +1,105 @@
 # EDF6 Enemy HP
 
-Vida de los enemigos que vas golpeando en Earth Defense Force 6. Cada enemigo tiene una tarjeta
-compacta con el porcentaje, la barra, la vida actual / máxima y tu último golpe, en dos columnas y
-hasta 6: primero el que estás golpeando, después los otros vivos y al final las kills. Una kill queda
-4 segundos con cuánto tardaste en matarlo y tu DPS promedio. Los vivos se van a los 5 segundos sin
-golpes. F3 apaga todo.
+HP of the enemies you hit in Earth Defense Force 6. Each enemy gets a compact card with the
+percentage, the bar, current / max HP and your last hit, in two columns and up to 6: first the one
+you're hitting, then the other live ones and last the kills. A kill stays for 4 seconds with how long
+you took to kill it and your average DPS. Live ones go away after 5 seconds without hits. F3 turns
+everything off.
 
-Un enemigo excepcional pasa a una tarjeta detallada arriba: barra de 10 segmentos, tu DPS de los
-últimos 5 segundos y el tiempo estimado para matarlo a ese ritmo. Es excepcional si su vida máxima es
-4 veces o más la mediana de los últimos 32 enemigos que golpeaste, o si lleva más de 4 segundos
-aguantando tus golpes. Una vez excepcional, queda así.
+An exceptional enemy moves to a detailed card on top: a 10-segment bar, your DPS over the last 5
+seconds and the estimated time to kill it at that rate. It's exceptional if its max HP is 4 times or
+more the median of the last 32 enemies you hit, or if it has lasted more than 4 seconds under your
+fire. Once exceptional, it stays so.
 
-Pingear un enemigo (la tecla de "spot", Q por defecto) lo pasa a la tarjeta detallada durante 30
-segundos aunque no le pegues; cada ping renueva el plazo y la muerte lo corta. La vida sigue al día
-con el daño de cualquiera, aliados incluidos.
+Pinging an enemy (the game's "spot" key, Q by default) puts it on the detailed card for 30 seconds
+even if you don't hit it; every ping renews the time and death ends it. Its HP stays up to date with
+anyone's damage, allies included.
 
-El DPS cuenta solo tu daño, no el de aliados ni NPC. La franja clara de la barra es el daño reciente:
-se acumula mientras disparás y se achica medio segundo después de que parás.
+The DPS counts only your damage, not allies' or NPCs'. The light strip on the bar is recent damage:
+it builds up while you shoot and shrinks half a second after you stop.
 
-## Requisito: el Compendium
+## Requirement: the Compendium
 
-Es un módulo de [EDF6-Compendium](https://github.com/Divineridh/EDF6-Compendium): no trae hook de
-dibujado ni de teclado propio, sino que se registra en el Compendium por
-`Edf6Overlay_Register` (contrato en `src/edf6_overlay_api.h`, versión 2: necesita el Compendium
-0.3.0 o más nuevo, que suma texto con fuente y espaciado). El Compendium le avisa
-cuando apretás la tecla —por los mismos tres caminos que usa para F1— y le presta una superficie
-para dibujar en cada frame.
+It's a module of [EDF6-Compendium](https://github.com/Divineridh/EDF6-Compendium): it brings no
+drawing or keyboard hook of its own, but registers with the Compendium through
+`Edf6Overlay_Register` (contract in `src/edf6_overlay_api.h`, version 2: it needs Compendium 0.3.0
+or newer, which adds text with font and spacing). The Compendium tells it when you press the key,
+through the same three paths it uses for F1, and lends it a surface to draw on every frame.
 
-Así hay un solo hook de Present y un solo juego de hooks de input, que es lo que costó estabilizar
-con el overlay de Steam. Esta DLL solo engancha la función de daño del juego, con su propia copia de
-MinHook: el Compendium no toca esa función.
+That way there's a single Present hook and a single set of input hooks, which is what took
+stabilizing with the Steam overlay. This DLL only hooks the game's damage and ping functions, with
+its own copy of MinHook: the Compendium doesn't touch those.
 
-Sin el Compendium instalado no dibuja nada y lo deja escrito en `EnemyHp.log`, al lado del EDF6.exe.
+Without the Compendium installed it draws nothing and says so in `EnemyHp.log`, next to EDF6.exe.
 
-## Instalar
+## Install
 
 ```
 EARTH DEFENSE FORCE 6\Mods\Plugins\EDF6EnemyHp.dll
 ```
 
-La tecla se cambia en `Mods\EnemyHp\config.ini` con una línea `tecla=0x72` (código virtual; F3 por
-defecto).
+The key is changed in `Mods\EnemyHp\config.ini` with a `key=0x72` line (virtual-key code; F3 by
+default).
 
-## Cómo encuentra la vida
+## How it finds HP
 
-Engancha la función que aplica todo el daño (hoy `EDF.dll+0x547c30`). No la busca por dirección:
-la localiza por el bloque `addss/minss/maxss/movss` que escribe la vida, y lee los offsets de vida y
-vida máxima de esas mismas instrucciones. Un parche que mueva código no la rompe; si la forma no
-coincide, no engancha y lo dice en el log.
+It hooks the function that applies all damage (today `EDF.dll+0x547c30`). It isn't looked up by
+address: it's located by the `addss/minss/maxss/movss` block that writes HP, and the HP and max HP
+offsets are read from those same instructions. A patch that moves code doesn't break it; if the shape
+doesn't match, it doesn't hook and says so in the log.
 
-El filtro es por equipo y no por puntero al jugador: equipo 0 jugador, 1 enemigos, 2 NPC aliados
-(verificado con `trace_damage`). Así no depende de la clase ni del vehículo. El objeto del enemigo
-solo se lee adentro del hook, cuando el juego lo está usando, para no seguir un puntero de un
-enemigo ya liberado.
+The filter is by team, not by player pointer: team 0 player, 1 enemies, 2 allied NPCs (checked with
+`trace_damage`). So it doesn't depend on the class or the vehicle. The enemy object is only read
+inside the hook, while the game is using it, so a pointer to an enemy that was already freed is never
+followed.
 
-`tools/hpscan.py` es la herramienta con la que se encontró: diff de memoria por daño conocido y
-breakpoints de hardware de escritura y ejecución.
+`tools/hpscan.py` is the tool it was found with: memory diff by known damage and hardware write and
+execution breakpoints.
 
-## Cómo se entera de un ping
+## How it learns about a ping
 
-El juego llama "spot" al ping: crea un objeto `SpotEffect` (los tres círculos son `SpotCircle.dds`)
-cuyo `InitParam` trae el enemigo en `+0x40`. Esta DLL engancha el constructor de `SpotEffect` (hoy
-`EDF.dll+0x3047c0`) y, si el objetivo es del equipo enemigo, lo marca por 30 segundos. La vida se lee
-ahí mismo, mientras el juego construye el spot alrededor de ese enemigo.
+The game calls a ping a "spot": it creates a `SpotEffect` object (the three circles are
+`SpotCircle.dds`) whose `InitParam` holds the enemy at `+0x40`. This DLL hooks `SpotEffect`'s
+constructor (today `EDF.dll+0x3047c0`) and, if the target is on the enemy team, marks it for 30
+seconds. HP is read right there, while the game builds the spot around that enemy.
 
-Tampoco se busca por dirección: se parte del RTTI (`.?AVSpotEffect@@` → type descriptor → complete
-object locator → vtable), se busca el `lea` que carga esa vtable y se toma la función que lo
-contiene, que es el constructor. Si algo no coincide, lo dice en el log y el contador sigue sin
-pings.
+It isn't looked up by address either: it starts from the RTTI (`.?AVSpotEffect@@` → type
+descriptor → complete object locator → vtable), finds the `lea` that loads that vtable and takes the
+function around it, which is the constructor. If something doesn't match, the log says so and the
+counter keeps working without pings.
 
-Se encontró con `hpscan.py ping_watch` (fotos del enemigo antes y después del ping, para separar lo
-que se mueve solo), el RTTI de `EDF.dll` y `hpscan.py trace_exec` sobre el constructor.
+It was found with `hpscan.py ping_watch` (snapshots of the enemy before and after the ping, to
+separate what moves on its own), `EDF.dll`'s RTTI and `hpscan.py trace_exec` on the constructor.
 
-## Diagnóstico
+## Diagnostics
 
-Una vez registrado, todo va a `Compendium.log` con el prefijo `hp enemigos:`. La línea
-`modulos: registrado Enemy HP` confirma que el Compendium lo aceptó, `enganchado EDF.dll+0x...`
-que encontró la función de daño, y `pings hooked at EDF.dll+0x...` que encontró la de los pings.
+Once registered, everything goes to `Compendium.log` with the `enemy hp:` prefix. The line
+`modules: registered Enemy HP` confirms the Compendium accepted it, `hooked EDF.dll+0x...` that it
+found the damage function, and `pings hooked at EDF.dll+0x...` that it found the ping one.
 
-## Compilar
+## Build
 
 ```bash
 build.bat
 ```
 
-Build Tools de VS2019 (MSVC 14.29). Las dependencias no están en el repo; se clonan en `deps/`:
+VS2019 Build Tools (MSVC 14.29). Dependencies aren't in the repo; clone them into `deps/`:
 
 ```bash
 git clone https://github.com/TsudaKageyu/minhook    deps/minhook
 git clone https://github.com/Quarri6343/EDF6Plugins deps/EDF6Plugins
 ```
 
-## Empaquetar
+## Package
 
 ```bash
-python tools/paquete.py
+python tools/package.py
 ```
 
-Deja `EDF6EnemyHp.zip` en `../builds/` con la DLL, el `config.ini` de ejemplo y el `LEEME.txt`. Se
-niega a empaquetar si algún archivo de `src/` es más nuevo que la DLL.
+Writes `EDF6EnemyHp.zip` to `../builds/` with the DLL, the sample `config.ini` and `README.txt`. It
+refuses to package if any file in `src/` is newer than the DLL.
 
-## Origen
+## Origin
 
-Nació dentro del repo del Compendium (rama `hp-enemigos`) y se separó cuando el Compendium pasó a
-aceptar módulos.
+It was born inside the Compendium's repo (`hp-enemigos` branch) and was split off when the Compendium
+started accepting modules.
