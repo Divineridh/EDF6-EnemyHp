@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
@@ -23,7 +24,7 @@ constexpr int kEnemyTeam = 1;
 constexpr int32_t kDamageInfoTeamOffset = 0x24;
 constexpr int32_t kTargetTeamOffset = 0x314;
 constexpr ULONGLONG kVisibleAfterHitMs = 5000;
-constexpr ULONGLONG kVisibleAfterKillMs = 1500;
+constexpr ULONGLONG kVisibleAfterKillMs = 4000;
 constexpr DWORD kWaitForGameDllMs = 30000;
 constexpr DWORD kWaitForHostMs = 30000;
 constexpr int kDefaultToggleKey = VK_F3;
@@ -31,10 +32,19 @@ constexpr int kHitHistory = 64;
 constexpr ULONGLONG kDpsWindowMs = 5000;
 constexpr int kSegments = 10;
 constexpr float kDesignScale = 0.55f;
+constexpr int kMaxTracked = 16;
+constexpr int kMaxCompact = 6;
+constexpr int kMaxHpSamples = 32;
+constexpr int kMinSamplesToCompare = 5;
+constexpr float kExceptionalHpRatio = 4.0f;
+constexpr ULONGLONG kExceptionalAfterMs = 4000;
+constexpr ULONGLONG kTrailHoldMs = 500;
+constexpr ULONGLONG kTrailShrinkMs = 300;
 
 constexpr uint32_t kCardBackground = 0x1E2422F2;
 constexpr uint32_t kCardBorder = 0x2E3532FF;
 constexpr uint32_t kSegmentEmpty = 0x2E3532FF;
+constexpr uint32_t kTrailColor = 0xD6CCB8FF;
 constexpr uint32_t kTextColor = 0xE8ECE9FF;
 constexpr uint32_t kSoftColor = 0xB7BEBAFF;
 constexpr uint32_t kMutedColor = 0x8C938FFF;
@@ -63,16 +73,28 @@ struct TrackedEnemy {
     float hp = 0.0f;
     float maxHp = 0.0f;
     ULONGLONG lastUpdate = 0;
+    ULONGLONG firstPlayerHitAt = 0;
+    ULONGLONG lastPlayerHitAt = 0;
+    ULONGLONG killedAt = 0;
     float lastPlayerHit = 0.0f;
+    float playerDamage = 0.0f;
+    float trailHp = 0.0f;
+    bool exceptional = false;
     Hit hits[kHitHistory];
     int hitCount = 0;
+};
+
+struct Tracker {
+    TrackedEnemy enemies[kMaxTracked];
+    float maxHpSamples[kMaxHpSamples] = {};
+    int sampleCount = 0;
 };
 
 ApplyDamageFn originalApplyDamage = nullptr;
 int32_t hpOffset = 0;
 int32_t maxHpOffset = 0;
 std::mutex trackedMutex;
-TrackedEnemy tracked;
+Tracker tracker;
 std::atomic<bool> counterEnabled{true};
 std::atomic<const Edf6OverlayHost *> host{nullptr};
 
@@ -139,6 +161,45 @@ int32_t ReadInt(uintptr_t base, int32_t offset) {
     return *reinterpret_cast<const int32_t *>(base + offset);
 }
 
+TrackedEnemy *FindTracked(uintptr_t target) {
+    for (TrackedEnemy &enemy : tracker.enemies) {
+        if (enemy.target == target) {
+            return &enemy;
+        }
+    }
+    return nullptr;
+}
+
+TrackedEnemy *OldestSlot() {
+    TrackedEnemy *oldest = &tracker.enemies[0];
+    for (TrackedEnemy &enemy : tracker.enemies) {
+        if (!enemy.target) {
+            return &enemy;
+        }
+        if (enemy.lastUpdate < oldest->lastUpdate) {
+            oldest = &enemy;
+        }
+    }
+    return oldest;
+}
+
+float MedianMaxHp() {
+    const int count = tracker.sampleCount < kMaxHpSamples ? tracker.sampleCount : kMaxHpSamples;
+    float sorted[kMaxHpSamples];
+    std::copy(tracker.maxHpSamples, tracker.maxHpSamples + count, sorted);
+    std::nth_element(sorted, sorted + count / 2, sorted + count);
+    return sorted[count / 2];
+}
+
+bool StandsOut(float maxHp) {
+    return tracker.sampleCount >= kMinSamplesToCompare && maxHp >= MedianMaxHp() * kExceptionalHpRatio;
+}
+
+void RecordMaxHp(float maxHp) {
+    tracker.maxHpSamples[tracker.sampleCount % kMaxHpSamples] = maxHp;
+    tracker.sampleCount++;
+}
+
 void __fastcall HookedApplyDamage(uintptr_t target, uintptr_t damageInfo) {
     const float hpBefore = ReadFloat(target, hpOffset);
     const bool playerHitsEnemy = ReadInt(damageInfo, kDamageInfoTeamOffset) == kPlayerTeam &&
@@ -149,22 +210,45 @@ void __fastcall HookedApplyDamage(uintptr_t target, uintptr_t damageInfo) {
         return;
     }
     std::lock_guard<std::mutex> lock(trackedMutex);
-    if (!playerHitsEnemy && target != tracked.target) {
-        return;
+    TrackedEnemy *enemy = FindTracked(target);
+    const bool reusedPointer = enemy && enemy->hp <= 0.0f && hpBefore > 0.0f;
+    if (reusedPointer) {
+        *enemy = TrackedEnemy();
     }
-    if (target != tracked.target) {
-        tracked = TrackedEnemy();
-        tracked.target = target;
+    if (!enemy || reusedPointer) {
+        if (!playerHitsEnemy) {
+            return;
+        }
+        enemy = enemy ? enemy : OldestSlot();
+        *enemy = TrackedEnemy();
+        enemy->target = target;
+        enemy->maxHp = ReadFloat(target, maxHpOffset);
+        enemy->exceptional = StandsOut(enemy->maxHp);
+        RecordMaxHp(enemy->maxHp);
     }
     const ULONGLONG now = GetTickCount64();
-    tracked.hp = hpAfter;
-    tracked.maxHp = ReadFloat(target, maxHpOffset);
-    tracked.lastUpdate = now;
+    enemy->hp = hpAfter;
+    enemy->maxHp = ReadFloat(target, maxHpOffset);
+    enemy->lastUpdate = now;
+    if (hpAfter <= 0.0f && !enemy->killedAt) {
+        enemy->killedAt = now;
+    }
     const float damage = hpBefore - hpAfter;
     if (playerHitsEnemy && damage > 0.0f) {
-        tracked.lastPlayerHit = damage;
-        tracked.hits[tracked.hitCount % kHitHistory] = Hit{now, damage};
-        tracked.hitCount++;
+        if (!enemy->firstPlayerHitAt) {
+            enemy->firstPlayerHitAt = now;
+        }
+        if (now - enemy->lastPlayerHitAt > kTrailHoldMs) {
+            enemy->trailHp = hpBefore;
+        }
+        enemy->lastPlayerHitAt = now;
+        enemy->lastPlayerHit = damage;
+        enemy->playerDamage += damage;
+        enemy->hits[enemy->hitCount % kHitHistory] = Hit{now, damage};
+        enemy->hitCount++;
+        if (hpAfter > 0.0f && now - enemy->firstPlayerHitAt > kExceptionalAfterMs) {
+            enemy->exceptional = true;
+        }
     }
 }
 
@@ -275,17 +359,43 @@ bool HookDamage() {
     return true;
 }
 
-TrackedEnemy Snapshot() {
-    std::lock_guard<std::mutex> lock(trackedMutex);
-    return tracked;
-}
-
-bool StillVisible(const TrackedEnemy &enemy, ULONGLONG now) {
-    if (!counterEnabled || !enemy.target) {
+bool Visible(const TrackedEnemy &enemy, ULONGLONG now) {
+    if (!enemy.target || !enemy.firstPlayerHitAt) {
         return false;
     }
     const ULONGLONG window = enemy.hp <= 0.0f ? kVisibleAfterKillMs : kVisibleAfterHitMs;
     return now - enemy.lastUpdate < window;
+}
+
+int VisibleEnemies(TrackedEnemy *out, ULONGLONG now) {
+    std::lock_guard<std::mutex> lock(trackedMutex);
+    int count = 0;
+    for (const TrackedEnemy &enemy : tracker.enemies) {
+        if (Visible(enemy, now)) {
+            out[count++] = enemy;
+        }
+    }
+    return count;
+}
+
+float Clamp01(float value) {
+    return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+}
+
+float HpFraction(const TrackedEnemy &enemy) {
+    return enemy.maxHp > 0.0f ? Clamp01(enemy.hp / enemy.maxHp) : 0.0f;
+}
+
+float TrailFraction(const TrackedEnemy &enemy, ULONGLONG now) {
+    const float current = HpFraction(enemy);
+    const ULONGLONG since = now - enemy.lastPlayerHitAt;
+    if (enemy.maxHp <= 0.0f || since >= kTrailHoldMs + kTrailShrinkMs) {
+        return current;
+    }
+    const float keep = since <= kTrailHoldMs ? 1.0f : 1.0f - (float)(since - kTrailHoldMs) / kTrailShrinkMs;
+    const float hp = enemy.hp > 0.0f ? enemy.hp : 0.0f;
+    const float trail = Clamp01((hp + (enemy.trailHp - hp) * keep) / enemy.maxHp);
+    return trail > current ? trail : current;
 }
 
 std::string WithThousands(float value) {
@@ -343,6 +453,17 @@ std::string TimeLeft(float seconds) {
     return buf;
 }
 
+std::string KillSummary(const TrackedEnemy &enemy) {
+    const float seconds = (float)(enemy.killedAt - enemy.firstPlayerHitAt) / 1000.0f;
+    char buf[64];
+    if (seconds < 1.0f) {
+        snprintf(buf, sizeof(buf), "%.1fs", seconds);
+    } else {
+        snprintf(buf, sizeof(buf), "%.1fs  %s dps", seconds, WithThousands(enemy.playerDamage / seconds).c_str());
+    }
+    return buf;
+}
+
 float TextWidth(const Edf6OverlayHost *h, float size, int font, float spacing, const char *text) {
     float w = 0.0f;
     float ht = 0.0f;
@@ -363,31 +484,86 @@ void OnToggle() {
 }
 
 int WantsDraw() {
-    return StillVisible(Snapshot(), GetTickCount64()) ? 1 : 0;
+    if (!counterEnabled) {
+        return 0;
+    }
+    const ULONGLONG now = GetTickCount64();
+    std::lock_guard<std::mutex> lock(trackedMutex);
+    for (const TrackedEnemy &enemy : tracker.enemies) {
+        if (Visible(enemy, now)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
-void Draw(const Edf6OverlayHost *h) {
-    const ULONGLONG now = GetTickCount64();
-    const TrackedEnemy enemy = Snapshot();
-    if (!StillVisible(enemy, now)) {
-        return;
-    }
-    const float k = h->scale() * kDesignScale;
-    float screenW = 0.0f;
-    float screenH = 0.0f;
-    h->screenSize(&screenW, &screenH);
-    const float width = 560.0f * k;
-    const float height = 96.0f * k;
-    const float pad = 16.0f * k;
-    const float x0 = (screenW - width) * 0.5f;
-    const float y0 = 40.0f * k;
+void DrawCard(const Edf6OverlayHost *h, float x0, float y0, float x1, float y1, float k) {
+    h->fillRect(x0, y0, x1, y1, kCardBackground);
+    h->strokeRect(x0, y0, x1, y1, kCardBorder, k);
+}
+
+void DrawRightText(const Edf6OverlayHost *h, float right, float y, float size, uint32_t color, int font,
+                   const std::string &text) {
+    const float w = TextWidth(h, size, font, 0.0f, text.c_str());
+    h->textEx(right - w, y, size, color, font, 0.0f, text.c_str());
+}
+
+void DrawCompact(const Edf6OverlayHost *h, const TrackedEnemy &enemy, float x0, float y0, float width, float k,
+                 ULONGLONG now) {
+    const float height = 56.0f * k;
+    const float pad = 10.0f * k;
     const float right = x0 + width - pad;
-    h->fillRect(x0, y0, x0 + width, y0 + height, kCardBackground);
-    h->strokeRect(x0, y0, x0 + width, y0 + height, kCardBorder, k);
+    DrawCard(h, x0, y0, x0 + width, y0 + height, k);
 
     const bool defeated = enemy.hp <= 0.0f;
-    float fraction = enemy.maxHp > 0.0f ? enemy.hp / enemy.maxHp : 0.0f;
-    fraction = fraction < 0.0f ? 0.0f : (fraction > 1.0f ? 1.0f : fraction);
+    const float fraction = HpFraction(enemy);
+    const uint32_t color = HealthColor(fraction);
+    const float labelSize = 12.0f * k;
+    h->textEx(x0 + pad, y0 + pad - 2.0f * k, labelSize, defeated ? kMutedColor : kTextColor, EDF6_FONT_BOLD,
+              2.0f * k, "ENEMY");
+    char percent[32];
+    if (defeated) {
+        snprintf(percent, sizeof(percent), "DEFEATED");
+    } else if (fraction < 0.01f) {
+        snprintf(percent, sizeof(percent), "<1%%");
+    } else {
+        snprintf(percent, sizeof(percent), "%.0f%%", fraction * 100.0f);
+    }
+    DrawRightText(h, right, y0 + pad - 2.0f * k, labelSize, color, EDF6_FONT_MONO, percent);
+
+    const float barX0 = x0 + pad;
+    const float barX1 = right;
+    const float barY = y0 + 28.0f * k;
+    const float barH = 4.0f * k;
+    h->fillRect(barX0, barY, barX1, barY + barH, kSegmentEmpty);
+    const float trail = TrailFraction(enemy, now);
+    if (trail > fraction) {
+        h->fillRect(barX0, barY, barX0 + (barX1 - barX0) * trail, barY + barH, kTrailColor);
+    }
+    if (fraction > 0.0f) {
+        h->fillRect(barX0, barY, barX0 + (barX1 - barX0) * fraction, barY + barH, color);
+    }
+
+    const float smallSize = 11.0f * k;
+    const float bottomY = y0 + 37.0f * k;
+    const std::string amounts = WithThousands(enemy.hp > 0.0f ? enemy.hp : 0.0f) + " / " + WithThousands(enemy.maxHp);
+    h->textEx(barX0, bottomY, smallSize, kSoftColor, EDF6_FONT_MONO, 0.0f, amounts.c_str());
+    if (defeated) {
+        DrawRightText(h, right, bottomY, smallSize, kMutedColor, EDF6_FONT_MONO, KillSummary(enemy));
+    } else if (enemy.lastPlayerHit > 0.0f) {
+        DrawRightText(h, right, bottomY, smallSize, kMutedColor, EDF6_FONT_MONO, "-" + WithThousands(enemy.lastPlayerHit));
+    }
+}
+
+void DrawDetailed(const Edf6OverlayHost *h, const TrackedEnemy &enemy, float x0, float y0, float width, float k,
+                  ULONGLONG now) {
+    const float height = 96.0f * k;
+    const float pad = 16.0f * k;
+    const float right = x0 + width - pad;
+    DrawCard(h, x0, y0, x0 + width, y0 + height, k);
+
+    const bool defeated = enemy.hp <= 0.0f;
+    const float fraction = HpFraction(enemy);
     const uint32_t color = HealthColor(fraction);
 
     h->fillRect(x0 + pad, y0 + pad + 6.0f * k, x0 + pad + 7.0f * k, y0 + pad + 13.0f * k, color);
@@ -408,7 +584,10 @@ void Draw(const Edf6OverlayHost *h) {
     const float smallSize = 13.0f * k;
     const float smallY = bigY + bigH - TextHeight(h, smallSize, EDF6_FONT_MONO, "0") - 3.0f * k;
     const float dps = PlayerDps(enemy, now);
-    if (dps > 0.0f && !defeated) {
+    if (defeated) {
+        const std::string summary = KillSummary(enemy);
+        DrawRightText(h, right - bigW - 18.0f * k, smallY, smallSize, kMutedColor, EDF6_FONT_MONO, summary);
+    } else if (dps > 0.0f) {
         float cursor = right - bigW - 18.0f * k;
         const std::string eta = TimeLeft(enemy.hp / dps);
         const float etaW = TextWidth(h, smallSize, EDF6_FONT_MONO, 0.0f, eta.c_str());
@@ -423,11 +602,15 @@ void Draw(const Edf6OverlayHost *h) {
     const float barH = 14.0f * k;
     const float gap = 2.0f * k;
     const float segmentW = (width - 2.0f * pad - gap * (kSegments - 1)) / kSegments;
+    const float trail = TrailFraction(enemy, now);
     for (int i = 0; i < kSegments; i++) {
         const float sx = x0 + pad + i * (segmentW + gap);
         h->fillRect(sx, barY, sx + segmentW, barY + barH, kSegmentEmpty);
-        float fill = fraction * kSegments - i;
-        fill = fill < 0.0f ? 0.0f : (fill > 1.0f ? 1.0f : fill);
+        const float trailFill = Clamp01(trail * kSegments - i);
+        if (trailFill > 0.0f) {
+            h->fillRect(sx, barY, sx + segmentW * trailFill, barY + barH, kTrailColor);
+        }
+        const float fill = Clamp01(fraction * kSegments - i);
         if (fill > 0.0f) {
             h->fillRect(sx, barY, sx + segmentW * fill, barY + barH, color);
         }
@@ -440,6 +623,64 @@ void Draw(const Edf6OverlayHost *h) {
         const std::string hit = "-" + WithThousands(enemy.lastPlayerHit);
         const float hitW = TextWidth(h, smallSize, EDF6_FONT_MONO, 0.0f, hit.c_str());
         h->textEx(right - hitW, bottomY, smallSize, kMutedColor, EDF6_FONT_MONO, 0.0f, hit.c_str());
+    }
+}
+
+bool DrawsFirst(const TrackedEnemy *a, const TrackedEnemy *b) {
+    const bool aAlive = a->hp > 0.0f;
+    const bool bAlive = b->hp > 0.0f;
+    if (aAlive != bAlive) {
+        return aAlive;
+    }
+    return a->lastUpdate > b->lastUpdate;
+}
+
+void Draw(const Edf6OverlayHost *h) {
+    if (!counterEnabled) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    static TrackedEnemy visible[kMaxTracked];
+    const int count = VisibleEnemies(visible, now);
+    if (count == 0) {
+        return;
+    }
+    const TrackedEnemy *order[kMaxTracked];
+    for (int i = 0; i < count; i++) {
+        order[i] = &visible[i];
+    }
+    std::sort(order, order + count, DrawsFirst);
+
+    const float k = h->scale() * kDesignScale;
+    float screenW = 0.0f;
+    float screenH = 0.0f;
+    h->screenSize(&screenW, &screenH);
+    const float width = 560.0f * k;
+    const float x0 = (screenW - width) * 0.5f;
+    float y = 40.0f * k;
+
+    const TrackedEnemy *detailed = nullptr;
+    for (int i = 0; i < count && !detailed; i++) {
+        if (order[i]->exceptional) {
+            detailed = order[i];
+        }
+    }
+    if (detailed) {
+        DrawDetailed(h, *detailed, x0, y, width, k, now);
+        y += (96.0f + 8.0f) * k;
+    }
+
+    const float gap = 8.0f * k;
+    const float columnW = (width - gap) * 0.5f;
+    int drawn = 0;
+    for (int i = 0; i < count && drawn < kMaxCompact; i++) {
+        if (order[i] == detailed) {
+            continue;
+        }
+        const float cx = x0 + (drawn % 2) * (columnW + gap);
+        const float cy = y + (drawn / 2) * (56.0f * k + gap);
+        DrawCompact(h, *order[i], cx, cy, columnW, k, now);
+        drawn++;
     }
 }
 
