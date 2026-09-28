@@ -1,10 +1,18 @@
 # EDF6 Enemy HP
 
-Tarjeta con la vida del último enemigo que golpeaste en Earth Defense Force 6: porcentaje, barra de
-10 segmentos que pasa de verde a ámbar y rojo, vida actual / máxima, tu DPS de los últimos 5
-segundos, el tiempo estimado para matarlo a ese ritmo y el último golpe. El DPS cuenta solo tu daño,
-no el de aliados ni NPC. Aparece al pegar, se va a los 5 segundos sin golpes (1,5 s si lo mataste)
-y F3 la apaga.
+Vida de los enemigos que vas golpeando en Earth Defense Force 6. Cada enemigo tiene una tarjeta
+compacta con el porcentaje, la barra, la vida actual / máxima y tu último golpe, en dos columnas y
+hasta 6: primero el que estás golpeando, después los otros vivos y al final las kills. Una kill queda
+4 segundos con cuánto tardaste en matarlo y tu DPS promedio. Los vivos se van a los 5 segundos sin
+golpes. F3 apaga todo.
+
+Un enemigo excepcional pasa a una tarjeta detallada arriba: barra de 10 segmentos, tu DPS de los
+últimos 5 segundos y el tiempo estimado para matarlo a ese ritmo. Es excepcional si su vida máxima es
+4 veces o más la mediana de los últimos 32 enemigos que golpeaste, o si lleva más de 4 segundos
+aguantando tus golpes. Una vez excepcional, queda así.
+
+El DPS cuenta solo tu daño, no el de aliados ni NPC. La franja clara de la barra es el daño reciente:
+se acumula mientras disparás y se achica medio segundo después de que parás.
 
 ## Requisito: el Compendium
 
