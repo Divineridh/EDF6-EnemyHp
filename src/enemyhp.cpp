@@ -27,6 +27,17 @@ constexpr ULONGLONG kVisibleAfterKillMs = 1500;
 constexpr DWORD kWaitForGameDllMs = 30000;
 constexpr DWORD kWaitForHostMs = 30000;
 constexpr int kDefaultToggleKey = VK_F3;
+constexpr int kHitHistory = 64;
+constexpr ULONGLONG kDpsWindowMs = 5000;
+constexpr int kSegments = 10;
+constexpr float kDesignScale = 0.55f;
+
+constexpr uint32_t kCardBackground = 0x1E2422F2;
+constexpr uint32_t kCardBorder = 0x2E3532FF;
+constexpr uint32_t kSegmentEmpty = 0x2E3532FF;
+constexpr uint32_t kTextColor = 0xE8ECE9FF;
+constexpr uint32_t kSoftColor = 0xB7BEBAFF;
+constexpr uint32_t kMutedColor = 0x8C938FFF;
 
 const uint8_t kHpWriteBlock[] = {
     0xF3, 0x0F, 0x58, 0x87, 0x00, 0x00, 0x00, 0x00,
@@ -42,11 +53,19 @@ const uint8_t kExpectedPrologue[] = {0x48, 0x8B, 0xC4};
 
 using ApplyDamageFn = void(__fastcall *)(uintptr_t target, uintptr_t damageInfo);
 
+struct Hit {
+    ULONGLONG at = 0;
+    float damage = 0.0f;
+};
+
 struct TrackedEnemy {
     uintptr_t target = 0;
     float hp = 0.0f;
     float maxHp = 0.0f;
     ULONGLONG lastUpdate = 0;
+    float lastPlayerHit = 0.0f;
+    Hit hits[kHitHistory];
+    int hitCount = 0;
 };
 
 ApplyDamageFn originalApplyDamage = nullptr;
@@ -133,10 +152,20 @@ void __fastcall HookedApplyDamage(uintptr_t target, uintptr_t damageInfo) {
     if (!playerHitsEnemy && target != tracked.target) {
         return;
     }
-    tracked.target = target;
+    if (target != tracked.target) {
+        tracked = TrackedEnemy();
+        tracked.target = target;
+    }
+    const ULONGLONG now = GetTickCount64();
     tracked.hp = hpAfter;
     tracked.maxHp = ReadFloat(target, maxHpOffset);
-    tracked.lastUpdate = GetTickCount64();
+    tracked.lastUpdate = now;
+    const float damage = hpBefore - hpAfter;
+    if (playerHitsEnemy && damage > 0.0f) {
+        tracked.lastPlayerHit = damage;
+        tracked.hits[tracked.hitCount % kHitHistory] = Hit{now, damage};
+        tracked.hitCount++;
+    }
 }
 
 bool TextSection(HMODULE module, const uint8_t **start, size_t *size) {
@@ -273,14 +302,59 @@ std::string WithThousands(float value) {
     return out;
 }
 
-uint32_t BarColor(float fraction) {
+uint32_t HealthColor(float fraction) {
     if (fraction > 0.5f) {
-        return 0x4DCC59FF;
+        return 0x5ED17AFF;
     }
     if (fraction > 0.2f) {
-        return 0xF2BF33FF;
+        return 0xF0A73AFF;
     }
-    return 0xE6402EFF;
+    return 0xFF6B6BFF;
+}
+
+float PlayerDps(const TrackedEnemy &enemy, ULONGLONG now) {
+    float total = 0.0f;
+    ULONGLONG oldest = now;
+    int inWindow = 0;
+    const int stored = enemy.hitCount < kHitHistory ? enemy.hitCount : kHitHistory;
+    for (int i = 0; i < stored; i++) {
+        const Hit &hit = enemy.hits[i];
+        if (now - hit.at <= kDpsWindowMs) {
+            total += hit.damage;
+            oldest = hit.at < oldest ? hit.at : oldest;
+            inWindow++;
+        }
+    }
+    if (inWindow < 2) {
+        return 0.0f;
+    }
+    const float seconds = (float)(now - oldest) / 1000.0f;
+    return total / (seconds > 1.0f ? seconds : 1.0f);
+}
+
+std::string TimeLeft(float seconds) {
+    char buf[32];
+    const int s = (int)std::ceil(seconds);
+    if (s < 60) {
+        snprintf(buf, sizeof(buf), "~%ds", s);
+    } else {
+        snprintf(buf, sizeof(buf), "~%dm %02ds", s / 60, s % 60);
+    }
+    return buf;
+}
+
+float TextWidth(const Edf6OverlayHost *h, float size, int font, float spacing, const char *text) {
+    float w = 0.0f;
+    float ht = 0.0f;
+    h->textExSize(size, font, spacing, text, &w, &ht);
+    return w;
+}
+
+float TextHeight(const Edf6OverlayHost *h, float size, int font, const char *text) {
+    float w = 0.0f;
+    float ht = 0.0f;
+    h->textExSize(size, font, 0.0f, text, &w, &ht);
+    return ht;
 }
 
 void OnToggle() {
@@ -293,40 +367,80 @@ int WantsDraw() {
 }
 
 void Draw(const Edf6OverlayHost *h) {
+    const ULONGLONG now = GetTickCount64();
     const TrackedEnemy enemy = Snapshot();
-    if (!StillVisible(enemy, GetTickCount64())) {
+    if (!StillVisible(enemy, now)) {
         return;
     }
-    const float scale = h->scale();
+    const float k = h->scale() * kDesignScale;
     float screenW = 0.0f;
     float screenH = 0.0f;
     h->screenSize(&screenW, &screenH);
-    const float width = 420.0f * scale;
-    const float height = 22.0f * scale;
-    const float pad = 6.0f * scale;
+    const float width = 560.0f * k;
+    const float height = 96.0f * k;
+    const float pad = 16.0f * k;
     const float x0 = (screenW - width) * 0.5f;
-    const float y0 = 60.0f * scale;
-    h->fillRect(x0 - pad, y0 - pad, x0 + width + pad, y0 + height + pad, 0x0000008C);
-    h->fillRect(x0, y0, x0 + width, y0 + height, 0x2A2F2CFF);
+    const float y0 = 40.0f * k;
+    const float right = x0 + width - pad;
+    h->fillRect(x0, y0, x0 + width, y0 + height, kCardBackground);
+    h->strokeRect(x0, y0, x0 + width, y0 + height, kCardBorder, k);
 
+    const bool defeated = enemy.hp <= 0.0f;
     float fraction = enemy.maxHp > 0.0f ? enemy.hp / enemy.maxHp : 0.0f;
     fraction = fraction < 0.0f ? 0.0f : (fraction > 1.0f ? 1.0f : fraction);
-    if (fraction > 0.0f) {
-        h->fillRect(x0, y0, x0 + width * fraction, y0 + height, BarColor(fraction));
+    const uint32_t color = HealthColor(fraction);
+
+    h->fillRect(x0 + pad, y0 + pad + 6.0f * k, x0 + pad + 7.0f * k, y0 + pad + 13.0f * k, color);
+    h->textEx(x0 + pad + 16.0f * k, y0 + pad, 15.0f * k, kTextColor, EDF6_FONT_BOLD, 2.5f * k, "ENEMY");
+
+    char percent[32];
+    if (defeated) {
+        snprintf(percent, sizeof(percent), "DEFEATED");
+    } else {
+        snprintf(percent, sizeof(percent), "%.1f%%", fraction * 100.0f);
+    }
+    const float bigSize = 22.0f * k;
+    const float bigW = TextWidth(h, bigSize, EDF6_FONT_BOLD, 0.0f, percent);
+    const float bigH = TextHeight(h, bigSize, EDF6_FONT_BOLD, percent);
+    const float bigY = y0 + pad - 5.0f * k;
+    h->textEx(right - bigW, bigY, bigSize, color, EDF6_FONT_BOLD, 0.0f, percent);
+
+    const float smallSize = 13.0f * k;
+    const float smallY = bigY + bigH - TextHeight(h, smallSize, EDF6_FONT_MONO, "0") - 3.0f * k;
+    const float dps = PlayerDps(enemy, now);
+    if (dps > 0.0f && !defeated) {
+        float cursor = right - bigW - 18.0f * k;
+        const std::string eta = TimeLeft(enemy.hp / dps);
+        const float etaW = TextWidth(h, smallSize, EDF6_FONT_MONO, 0.0f, eta.c_str());
+        h->textEx(cursor - etaW, smallY, smallSize, kMutedColor, EDF6_FONT_MONO, 0.0f, eta.c_str());
+        cursor -= etaW + 14.0f * k;
+        const std::string rate = WithThousands(dps) + " dps";
+        const float rateW = TextWidth(h, smallSize, EDF6_FONT_MONO, 0.0f, rate.c_str());
+        h->textEx(cursor - rateW, smallY, smallSize, kMutedColor, EDF6_FONT_MONO, 0.0f, rate.c_str());
     }
 
-    const std::string label = enemy.hp <= 0.0f
-                                  ? std::string("DEFEATED")
-                                  : WithThousands(enemy.hp) + " / " + WithThousands(enemy.maxHp) + "  " +
-                                        std::to_string(static_cast<int>(std::floor(fraction * 100.0f))) + "%";
-    const float size = 16.0f * scale;
-    float textW = 0.0f;
-    float textH = 0.0f;
-    h->textSize(size, label.c_str(), &textW, &textH);
-    const float tx = x0 + (width - textW) * 0.5f;
-    const float ty = y0 + (height - textH) * 0.5f;
-    h->text(tx + scale, ty + scale, size, 0x000000C0, label.c_str());
-    h->text(tx, ty, size, 0xFFFFFFFF, label.c_str());
+    const float barY = y0 + 44.0f * k;
+    const float barH = 14.0f * k;
+    const float gap = 2.0f * k;
+    const float segmentW = (width - 2.0f * pad - gap * (kSegments - 1)) / kSegments;
+    for (int i = 0; i < kSegments; i++) {
+        const float sx = x0 + pad + i * (segmentW + gap);
+        h->fillRect(sx, barY, sx + segmentW, barY + barH, kSegmentEmpty);
+        float fill = fraction * kSegments - i;
+        fill = fill < 0.0f ? 0.0f : (fill > 1.0f ? 1.0f : fill);
+        if (fill > 0.0f) {
+            h->fillRect(sx, barY, sx + segmentW * fill, barY + barH, color);
+        }
+    }
+
+    const float bottomY = barY + barH + 10.0f * k;
+    const std::string amounts = WithThousands(enemy.hp > 0.0f ? enemy.hp : 0.0f) + " / " + WithThousands(enemy.maxHp);
+    h->textEx(x0 + pad, bottomY, smallSize, kSoftColor, EDF6_FONT_MONO, 0.0f, amounts.c_str());
+    if (enemy.lastPlayerHit > 0.0f) {
+        const std::string hit = "-" + WithThousands(enemy.lastPlayerHit);
+        const float hitW = TextWidth(h, smallSize, EDF6_FONT_MONO, 0.0f, hit.c_str());
+        h->textEx(right - hitW, bottomY, smallSize, kMutedColor, EDF6_FONT_MONO, 0.0f, hit.c_str());
+    }
 }
 
 Edf6OverlayModule overlayModule = {EDF6_OVERLAY_API_VERSION, "Enemy HP", kDefaultToggleKey, &OnToggle, &WantsDraw, &Draw};
@@ -344,13 +458,13 @@ bool RegisterWithHost() {
     auto registerModule =
         reinterpret_cast<Edf6OverlayRegisterFn>(GetProcAddress(hostDll, EDF6_OVERLAY_REGISTER));
     if (!registerModule) {
-        Log("el Compendium instalado no acepta modulos: hace falta una version mas nueva");
+        Log("el Compendium instalado no acepta modulos: hace falta la 0.3.0 o mas nueva");
         return false;
     }
     overlayModule.toggleKey = ReadToggleKey();
     const Edf6OverlayHost *granted = nullptr;
     if (!registerModule(&overlayModule, &granted) || !granted) {
-        Log("el Compendium rechazo el modulo (version de API distinta?); el detalle esta en Compendium.log");
+        Log("el Compendium rechazo el modulo: hace falta la 0.3.0 o mas nueva (detalle en Compendium.log)");
         return false;
     }
     host = granted;
@@ -370,7 +484,7 @@ DWORD WINAPI StartThread(LPVOID) {
 extern "C" BOOL __declspec(dllexport) EML6_Load(PluginInfo *pluginInfo) {
     pluginInfo->infoVersion = PluginInfo::MaxInfoVer;
     pluginInfo->name = "Enemy HP";
-    pluginInfo->version = PLUG_VER(1, 0, 0, 0);
+    pluginInfo->version = PLUG_VER(1, 1, 0, 0);
     static bool started = false;
     if (started) {
         return TRUE;
