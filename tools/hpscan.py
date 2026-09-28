@@ -1,22 +1,26 @@
-"""Localiza la vida de un enemigo en EDF6.exe y la instrucción que la escribe.
+"""Finds an enemy's HP in EDF6.exe and the instruction that writes it, and probes pings.
 
-Uso:
+Usage:
     python hpscan.py snap  <pid> <snapshot>
-    python hpscan.py diff  <pid> <snapshot> <daño> <candidatos.pkl> [tolerancia]
-    python hpscan.py next  <pid> <candidatos.pkl> <daño> <candidatos.pkl> [tolerancia]
-    python hpscan.py same  <pid> <candidatos.pkl> <candidatos.pkl>
-    python hpscan.py show  <pid> <candidatos.pkl>
-    python hpscan.py dump  <pid> <address_hex> <bytes_antes> <bytes_despues>
-    python hpscan.py watch <pid> <address_hex|Modulo.dll+rva> <segundos>
-    python hpscan.py trace_damage <pid> <Modulo.dll+rva> <segundos> <out.pkl>
+    python hpscan.py diff  <pid> <snapshot> <damage> <candidates.pkl> [tolerance]
+    python hpscan.py next  <pid> <candidates.pkl> <damage> <candidates.pkl> [tolerance]
+    python hpscan.py same  <pid> <candidates.pkl> <candidates.pkl>
+    python hpscan.py show  <pid> <candidates.pkl>
+    python hpscan.py dump  <pid> <address_hex> <bytes_before> <bytes_after>
+    python hpscan.py watch <pid> <address_hex|Module.dll+rva> <seconds>
+    python hpscan.py trace_damage <pid> <Module.dll+rva> <seconds> <out.pkl>
     python hpscan.py ping_probe <pid> <out.pkl>
+    python hpscan.py ping_watch <pid> <out.pkl>
+    python hpscan.py trace_exec <pid> <address_hex|Module.dll+rva> <seconds> <out.pkl>
 
-snap/diff comparan contra una foto completa del heap escribible: la vida de
-un enemigo tiene que haber bajado exactamente el daño que muestra el juego.
-watch pone un breakpoint de hardware de escritura sobre la dirección y
-reporta cada instrucción que la tocó (RIP es la instrucción siguiente).
-trace_damage pone un breakpoint de ejecución en la escritura de la vida
-(EDF.dll+0x54817a) y registra objetivo, atacante e info de cada impacto.
+snap/diff compare against a full snapshot of the writable heap: an enemy's HP
+has to have dropped by exactly the damage the game shows.
+watch sets a hardware write breakpoint on the address and reports every
+instruction that touched it (RIP is the next instruction).
+trace_damage sets an execution breakpoint on the HP write (EDF.dll+0x54817a)
+and records target, attacker and info of every hit.
+ping_probe / ping_watch snapshot an enemy before and after a ping (guided with
+beeps), and trace_exec records the arguments of every call to a function.
 """
 import array
 import ctypes
@@ -59,7 +63,7 @@ class MEMORY_BASIC_INFORMATION(ctypes.Structure):
 def open_process(pid, access=PROCESS_QUERY_INFORMATION | PROCESS_VM_READ):
     h = k32.OpenProcess(access, False, pid)
     if not h:
-        raise SystemExit("no pude abrir el proceso %d (correr como admin?)" % pid)
+        raise SystemExit("couldn't open process %d (run as admin?)" % pid)
     return h
 
 
@@ -112,7 +116,7 @@ def load_candidates(path):
 
 
 def print_candidates(candidates, limit=40):
-    print("candidatos: %d" % len(candidates))
+    print("candidates: %d" % len(candidates))
     for addr, value in list(candidates.items())[:limit]:
         print("  %016x  %.3f" % (addr, value))
 
@@ -132,7 +136,7 @@ def cmd_snap(pid, snapshot):
             total += len(data)
     with open(snapshot + ".idx", "wb") as f:
         pickle.dump(index, f)
-    print("regiones: %d, %.0f MB, %.1f s" % (len(index), total / 2**20, time.time() - started))
+    print("regions: %d, %.0f MB, %.1f s" % (len(index), total / 2**20, time.time() - started))
 
 
 def cmd_diff(pid, snapshot, damage, out, tolerance):
@@ -160,7 +164,7 @@ def cmd_diff(pid, snapshot, damage, out, tolerance):
                     if before != after and damage_matches(before, after, damage, tolerance):
                         candidates[base + start + i * 4] = after
     save_candidates(out, candidates)
-    print("bloques cambiados: %d, %.1f s" % (changed_chunks, time.time() - started))
+    print("changed blocks: %d, %.1f s" % (changed_chunks, time.time() - started))
     print_candidates(candidates)
 
 
@@ -189,9 +193,9 @@ def cmd_same(pid, infile, out):
 def cmd_show(pid, infile):
     h = open_process(pid)
     candidates = load_candidates(infile)
-    print("candidatos: %d" % len(candidates))
+    print("candidates: %d" % len(candidates))
     for addr, stored in list(candidates.items())[:40]:
-        print("  %016x  guardado=%.3f  ahora=%s" % (addr, stored, read_float(h, addr)))
+        print("  %016x  stored=%.3f  now=%s" % (addr, stored, read_float(h, addr)))
 
 
 def cmd_dump(pid, addr_hex, before, after):
@@ -305,7 +309,7 @@ def resolve_address(bases, text):
 
 def debug_session(pid, process, address, dr7, seconds, on_hit):
     if not k32.DebugActiveProcess(pid):
-        raise SystemExit("DebugActiveProcess falló: %d" % ctypes.get_last_error())
+        raise SystemExit("DebugActiveProcess failed: %d" % ctypes.get_last_error())
     k32.DebugSetProcessKillOnExit(False)
     threads = {}
     armed = False
@@ -331,14 +335,14 @@ def debug_session(pid, process, address, dr7, seconds, on_hit):
             elif code == LOAD_DLL_DEBUG_EVENT:
                 k32.CloseHandle(ctypes.c_void_p.from_address(union).value)
             elif code == EXIT_PROCESS_DEBUG_EVENT:
-                print("el juego se cerró")
+                print("the game closed")
                 return
             elif code == EXCEPTION_DEBUG_EVENT:
                 exception_code = ctypes.c_uint32.from_address(union).value
                 if exception_code == EXCEPTION_BREAKPOINT and not armed:
                     armed_threads = sum(set_breakpoint(t, address, dr7) for t in threads.values())
                     armed = True
-                    print("breakpoint armado en %d/%d hilos sobre %016x" % (armed_threads, len(threads), address), flush=True)
+                    print("breakpoint armed on %d/%d threads at %016x" % (armed_threads, len(threads), address), flush=True)
                 elif exception_code == EXCEPTION_SINGLE_STEP and event.dwThreadId in threads:
                     thread = threads[event.dwThreadId]
                     ctx = ThreadContext()
@@ -381,11 +385,11 @@ def cmd_watch(pid, addr_text, seconds):
             }
 
     debug_session(pid, process, address, DR7_WRITE_4_BYTES_SLOT0, seconds, on_write)
-    print("escrituras: %d desde %d instrucciones" % (sum(hits.values()), len(hits)))
+    print("writes: %d from %d instructions" % (sum(hits.values()), len(hits)))
     for rip, count in hits.most_common():
         sample = samples[rip]
-        print("\n== RIP %s (%016x)  x%d  valor después=%s" % (describe_address(bases, rip), rip, count, sample["value"]))
-        print("   código [-32..+32]: %s | %s" % (sample["code"][:32].hex(" "), sample["code"][32:].hex(" ")))
+        print("\n== RIP %s (%016x)  x%d  value after=%s" % (describe_address(bases, rip), rip, count, sample["value"]))
+        print("   code [-32..+32]: %s | %s" % (sample["code"][:32].hex(" "), sample["code"][32:].hex(" ")))
         registers = sample["registers"]
         for i in range(0, len(GENERAL_REGISTERS), 4):
             print("   " + "  ".join("%s=%016x" % (r, registers[r]) for r in GENERAL_REGISTERS[i : i + 4]))
@@ -432,7 +436,7 @@ def cmd_trace_damage(pid, addr_text, seconds, out):
     debug_session(pid, process, address, DR7_EXECUTE_SLOT0, seconds, on_execute)
     with open(out, "wb") as f:
         pickle.dump({"bases": bases, "records": records}, f)
-    print("impactos: %d -> %s" % (len(records), out))
+    print("hits: %d -> %s" % (len(records), out))
 
 
 OBJECT_BYTES = 0x2000

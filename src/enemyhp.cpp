@@ -120,7 +120,7 @@ std::string GamePath(const char *relative) {
 
 void Log(const char *message) {
     if (const Edf6OverlayHost *h = host.load()) {
-        const std::string line = std::string("hp enemigos: ") + message;
+        const std::string line = std::string("enemy hp: ") + message;
         h->log(line.c_str());
         return;
     }
@@ -357,18 +357,18 @@ const uint8_t *LocateApplyDamage(HMODULE gameDll) {
     const uint8_t *text = nullptr;
     size_t textSize = 0;
     if (!TextSection(gameDll, &text, &textSize)) {
-        Log("EDF.dll sin seccion .text");
+        Log("EDF.dll has no .text section");
         return nullptr;
     }
     const uint8_t *hpWrite = FindPattern(text, textSize, kHpWriteBlock, kHpWriteBlockMask);
     if (!hpWrite) {
-        Log("no encontre la escritura de la vida (cambio el juego?)");
+        Log("couldn't find the HP write (did the game change?)");
         return nullptr;
     }
     const int32_t addOffset = *reinterpret_cast<const int32_t *>(hpWrite + 4);
     const int32_t storeOffset = *reinterpret_cast<const int32_t *>(hpWrite + 28);
     if (addOffset != storeOffset) {
-        LogF("la vida se lee de +0x%X y se escribe en +0x%X", addOffset, storeOffset);
+        LogF("HP is read from +0x%X and written to +0x%X", addOffset, storeOffset);
         return nullptr;
     }
     hpOffset = addOffset;
@@ -377,14 +377,14 @@ const uint8_t *LocateApplyDamage(HMODULE gameDll) {
     DWORD64 imageBase = 0;
     PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(hpWrite), &imageBase, nullptr);
     if (!entry) {
-        Log("sin entrada de .pdata para la funcion de dano");
+        Log("no .pdata entry for the damage function");
         return nullptr;
     }
     const uint8_t *function = reinterpret_cast<const uint8_t *>(imageBase + entry->BeginAddress);
     if (memcmp(function, kExpectedPrologue, sizeof(kExpectedPrologue)) != 0 ||
         !ContainsBytes(function, hpWrite, kReadsDamageInfoTeam, sizeof(kReadsDamageInfoTeam)) ||
         !ContainsBytes(function, hpWrite, kReadsTargetTeam, sizeof(kReadsTargetTeam))) {
-        LogF("la funcion en EDF.dll+0x%llX no tiene la forma esperada",
+        LogF("the function at EDF.dll+0x%llX doesn't have the expected shape",
              static_cast<unsigned long long>(function - reinterpret_cast<const uint8_t *>(gameDll)));
         return nullptr;
     }
@@ -488,7 +488,7 @@ bool HookDamage() {
         Sleep(100);
     }
     if (!gameDll) {
-        Log("EDF.dll no cargo");
+        Log("EDF.dll didn't load");
         return false;
     }
     const uint8_t *function = LocateApplyDamage(gameDll);
@@ -504,10 +504,10 @@ bool HookDamage() {
     if (MH_CreateHook(target, reinterpret_cast<void *>(&HookedApplyDamage),
                       reinterpret_cast<void **>(&originalApplyDamage)) != MH_OK ||
         MH_EnableHook(target) != MH_OK) {
-        Log("no pude enganchar la funcion de dano");
+        Log("couldn't hook the damage function");
         return false;
     }
-    LogF("enganchado EDF.dll+0x%llX, vida en +0x%X, maxima en +0x%X",
+    LogF("hooked EDF.dll+0x%llX, HP at +0x%X, max at +0x%X",
          static_cast<unsigned long long>(function - reinterpret_cast<const uint8_t *>(gameDll)), hpOffset,
          maxHpOffset);
     HookSpotEffect(gameDll);
@@ -855,19 +855,19 @@ bool RegisterWithHost() {
         Sleep(100);
     }
     if (!hostDll) {
-        Log("no encontre " EDF6_OVERLAY_HOST_DLL ": este mod necesita el Compendium para dibujar y leer la tecla");
+        Log("couldn't find " EDF6_OVERLAY_HOST_DLL ": this mod needs the Compendium to draw and read keys");
         return false;
     }
     auto registerModule =
         reinterpret_cast<Edf6OverlayRegisterFn>(GetProcAddress(hostDll, EDF6_OVERLAY_REGISTER));
     if (!registerModule) {
-        Log("el Compendium instalado no acepta modulos: hace falta la 0.3.0 o mas nueva");
+        Log("the installed Compendium doesn't accept modules: it needs 0.3.0 or newer");
         return false;
     }
     overlayModule.toggleKey = ReadToggleKey();
     const Edf6OverlayHost *granted = nullptr;
     if (!registerModule(&overlayModule, &granted) || !granted) {
-        Log("el Compendium rechazo el modulo: hace falta la 0.3.0 o mas nueva (detalle en Compendium.log)");
+        Log("the Compendium refused the module: it needs 0.3.0 or newer (details in Compendium.log)");
         return false;
     }
     host = granted;
@@ -876,7 +876,7 @@ bool RegisterWithHost() {
 
 DWORD WINAPI StartThread(LPVOID) {
     if (RegisterWithHost()) {
-        LogF("registrado en el Compendium, tecla 0x%02X", overlayModule.toggleKey);
+        LogF("registered with the Compendium, key 0x%02X", overlayModule.toggleKey);
         HookDamage();
     }
     return 0;
