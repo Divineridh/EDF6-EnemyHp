@@ -1,0 +1,42 @@
+EDF6 Enemy HP
+=============
+
+Barra con la vida actual / maxima y el porcentaje del ultimo enemigo que
+golpeaste. Aparece al pegar, se va a los 5 segundos sin golpes (1,5 si lo
+mataste) y F3 la oculta o la vuelve a mostrar.
+
+REQUISITOS
+----------
+  - EDFModLoader: https://github.com/BlueAmulet/EDFModLoader
+  - EDF6 Compendium v0.2.0 o mas nuevo:
+    https://github.com/Divineridh/EDF6-Compendium/releases
+
+Este mod es un modulo del Compendium: el Compendium es el que dibuja en
+pantalla y lee la tecla. Sin el Compendium instalado no aparece nada.
+
+INSTALACION
+-----------
+Copiar la carpeta Mods de este paquete sobre la del juego, la que tiene el
+EDF6.exe. Queda asi:
+
+    EARTH DEFENSE FORCE 6\Mods\Plugins\EDF6EnemyHp.dll
+    EARTH DEFENSE FORCE 6\Mods\EnemyHp\config.ini
+
+TECLA
+-----
+F3 por defecto. Se cambia en Mods\EnemyHp\config.ini sacando el # de la linea
+"tecla" y poniendo el codigo de la tecla que quieras.
+
+SI NO APARECE
+-------------
+Con el Compendium instalado, todo queda escrito en Compendium.log, al lado del
+EDF6.exe:
+
+  - "modulos: registrado Enemy HP"       el Compendium lo acepto
+  - "hp enemigos: enganchado EDF.dll..."  encontro la funcion de dano
+
+Si falta la primera, revisar que el Compendium sea v0.2.0 o mas nuevo. Si falta
+la segunda, la linea anterior dice que no coincidio (puede pasar si una
+actualizacion del juego cambio esa funcion).
+
+Si el Compendium no esta instalado, el aviso queda en EnemyHp.log.

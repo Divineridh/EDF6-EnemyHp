@@ -60,6 +60,15 @@ git clone https://github.com/TsudaKageyu/minhook    deps/minhook
 git clone https://github.com/Quarri6343/EDF6Plugins deps/EDF6Plugins
 ```
 
+## Empaquetar
+
+```bash
+python tools/paquete.py
+```
+
+Deja `EDF6EnemyHp.zip` en `../builds/` con la DLL, el `config.ini` de ejemplo y el `LEEME.txt`. Se
+niega a empaquetar si algún archivo de `src/` es más nuevo que la DLL.
+
 ## Origen
 
 Nació dentro del repo del Compendium (rama `hp-enemigos`) y se separó cuando el Compendium pasó a
