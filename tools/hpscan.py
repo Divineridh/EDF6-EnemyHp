@@ -9,6 +9,7 @@ Uso:
     python hpscan.py dump  <pid> <address_hex> <bytes_antes> <bytes_despues>
     python hpscan.py watch <pid> <address_hex|Modulo.dll+rva> <segundos>
     python hpscan.py trace_damage <pid> <Modulo.dll+rva> <segundos> <out.pkl>
+    python hpscan.py ping_probe <pid> <out.pkl>
 
 snap/diff comparan contra una foto completa del heap escribible: la vida de
 un enemigo tiene que haber bajado exactamente el daño que muestra el juego.
@@ -35,6 +36,8 @@ MEM_PRIVATE = 0x20000
 PAGE_GUARD = 0x100
 WRITABLE_PROTECTIONS = {0x04, 0x08, 0x40, 0x80}
 CHUNK = 1 << 16
+DAMAGE_WRITE = "EDF.dll+0x54817a"
+HP_OFFSET = 0x2F8
 
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 psapi = ctypes.WinDLL("psapi", use_last_error=True)
@@ -432,6 +435,203 @@ def cmd_trace_damage(pid, addr_text, seconds, out):
     print("impactos: %d -> %s" % (len(records), out))
 
 
+OBJECT_BYTES = 0x2000
+
+
+def beep(times):
+    import winsound
+    for _ in range(times):
+        winsound.Beep(1200, 250)
+        time.sleep(0.15)
+
+
+def pointer_locations(h, target):
+    """Every 8-aligned qword in writable memory that holds target."""
+    needle = struct.pack("<Q", target)
+    found = set()
+    for base, size in writable_regions(h):
+        data = read(h, base, size)
+        at = data.find(needle)
+        while at >= 0:
+            if (base + at) % 8 == 0:
+                found.add(base + at)
+            at = data.find(needle, at + 1)
+    return found
+
+
+def most_hit_target(pid, process, bases, seconds):
+    address = resolve_address(bases, DAMAGE_WRITE)
+    hits = Counter()
+
+    def on_execute(ctx):
+        hits[ctx.get("Rdi")] += 1
+
+    debug_session(pid, process, address, DR7_EXECUTE_SLOT0, seconds, on_execute)
+    for target, count in hits.most_common(5):
+        print("  target %016x  hits %d  hp %s" % (target, count, read_float(process, target + HP_OFFSET)))
+    return hits.most_common(1)[0][0] if hits else None
+
+
+def cmd_ping_probe(pid, out):
+    """Guided: shoot an enemy on one beep, ping it on two beeps; prints what the ping changed."""
+    process = open_process(pid, PROCESS_ALL_ACCESS)
+    bases = module_bases(process)
+    print("1) one beep: shoot ONE big, slow enemy several times for 15 s", flush=True)
+    beep(1)
+    target = most_hit_target(pid, process, bases, 15)
+    if not target:
+        raise SystemExit("no hits recorded")
+    print("enemy: %016x (vtable %s)" % (target, describe_address(bases, read_u64(process, target))), flush=True)
+
+    object_before = read(process, target, OBJECT_BYTES)
+    started = time.time()
+    pointers_before = pointer_locations(process, target)
+    print("pointers to it before the ping: %d (%.1f s)" % (len(pointers_before), time.time() - started), flush=True)
+
+    print("2) two beeps: ping THAT enemy with Q, once, within 8 s", flush=True)
+    beep(2)
+    time.sleep(8)
+    object_after = read(process, target, OBJECT_BYTES)
+    pointers_after = pointer_locations(process, target)
+    beep(3)
+
+    changed = []
+    for offset in range(0, min(len(object_before), len(object_after)) - 3, 4):
+        before = object_before[offset:offset + 4]
+        after = object_after[offset:offset + 4]
+        if before != after:
+            changed.append((offset, before, after))
+    print("\nobject dwords that changed: %d (hp at +%#x, expect movement fields too)" % (len(changed), HP_OFFSET))
+    for offset, before, after in changed[:80]:
+        print("  +%04x  int %11d -> %11d   float %12.4f -> %12.4f" % (
+            offset, struct.unpack("<i", before)[0], struct.unpack("<i", after)[0],
+            struct.unpack("<f", before)[0], struct.unpack("<f", after)[0]))
+
+    new_pointers = sorted(pointers_after - pointers_before)
+    gone_pointers = sorted(pointers_before - pointers_after)
+    print("\nnew pointers to the enemy: %d, gone: %d" % (len(new_pointers), len(gone_pointers)))
+    for location in new_pointers[:30]:
+        owner = read_u64(process, location - 8)
+        print("  %016x   qword before it %016x (%s)" % (location, owner, describe_address(bases, owner)))
+        cmd_dump_to = read(process, location - 0x40, 0x80)
+        for offset in range(0, len(cmd_dump_to) - 7, 8):
+            q = struct.unpack_from("<Q", cmd_dump_to, offset)[0]
+            f1, f2 = struct.unpack_from("<ff", cmd_dump_to, offset)
+            print("      %+5x  q=%016x  f=%12.3f %12.3f  %s" % (
+                offset - 0x40, q, f1, f2, describe_address(bases, q) if q > 0x10000 else ""))
+
+    with open(out, "wb") as f:
+        pickle.dump({"bases": bases, "target": target, "object_before": object_before,
+                     "object_after": object_after, "changed": changed,
+                     "new_pointers": new_pointers, "gone_pointers": gone_pointers}, f)
+    print("\nsaved to %s" % out)
+
+
+def object_series(process, target, count, interval):
+    series = []
+    for _ in range(count):
+        series.append(read(process, target, OBJECT_BYTES))
+        time.sleep(interval)
+    return series
+
+
+def dword(blob, offset):
+    return blob[offset:offset + 4]
+
+
+def cmd_ping_watch(pid, out):
+    """Like ping_probe, but with many snapshots on each side of the ping, so fields that move on
+    their own (animation, position) are filtered out and timers show up as series."""
+    process = open_process(pid, PROCESS_ALL_ACCESS)
+    bases = module_bases(process)
+    print("1) one beep: shoot ONE big enemy several times for 15 s", flush=True)
+    beep(1)
+    target = most_hit_target(pid, process, bases, 15)
+    if not target:
+        raise SystemExit("no hits recorded")
+    print("enemy: %016x" % target, flush=True)
+
+    print("2) two beeps: STOP shooting, keep the enemy in view, don't ping yet (about 10 s)", flush=True)
+    beep(2)
+    pointers_pre_a = pointer_locations(process, target)
+    before = object_series(process, target, 10, 0.4)
+    pointers_pre_b = pointer_locations(process, target)
+
+    print("3) three beeps: ping it with Q now, once, and then don't shoot (about 20 s)", flush=True)
+    beep(3)
+    time.sleep(1.5)
+    pointers_post_a = pointer_locations(process, target)
+    after = object_series(process, target, 30, 0.5)
+    pointers_post_b = pointer_locations(process, target)
+    beep(1)
+    print("done", flush=True)
+
+    size = min(len(b) for b in before + after)
+    candidates = []
+    for offset in range(0, size - 3, 4):
+        pre = {dword(b, offset) for b in before}
+        if len(pre) != 1:
+            continue
+        pre_value = next(iter(pre))
+        post = [dword(a, offset) for a in after]
+        if post[0] != pre_value:
+            candidates.append(offset)
+    print("\nfields stable before the ping and different right after it: %d" % len(candidates))
+    for offset in candidates:
+        pre_value = dword(before[0], offset)
+        post = [dword(a, offset) for a in after]
+        ints = [struct.unpack("<i", v)[0] for v in [pre_value] + post]
+        floats = [struct.unpack("<f", v)[0] for v in [pre_value] + post]
+        looks_float = all(abs(f) < 1e7 and (f == 0 or abs(f) > 1e-6) for f in floats)
+        shown = ["%.3f" % f for f in floats] if looks_float else [str(i) for i in ints]
+        print("  +%04x  %s -> %s" % (offset, shown[0], " ".join(shown[1::3])))
+
+    stable_before = pointers_pre_a & pointers_pre_b
+    new_persistent = sorted((pointers_post_a & pointers_post_b) - pointers_pre_a - pointers_pre_b)
+    new_transient = sorted(pointers_post_a - pointers_post_b - pointers_pre_a - pointers_pre_b)
+    print("\npointers: stable before %d, new and still there 20 s later %d, new but gone %d" % (
+        len(stable_before), len(new_persistent), len(new_transient)))
+    for location in new_persistent[:20] + new_transient[:20]:
+        context = read(process, location - 0x20, 0x40)
+        words = [struct.unpack_from("<Q", context, o)[0] for o in range(0, len(context) - 7, 8)]
+        print("  %016x %s  %s" % (location, "persistent" if location in new_persistent else "transient ",
+                                  " ".join("%016x" % w for w in words)))
+
+    with open(out, "wb") as f:
+        pickle.dump({"bases": bases, "target": target, "before": before, "after": after,
+                     "candidates": candidates, "new_persistent": new_persistent,
+                     "new_transient": new_transient}, f)
+    print("\nsaved to %s" % out)
+
+
+def cmd_trace_exec(pid, addr_text, seconds, out):
+    """Execution breakpoint: on every hit, records the argument registers, the return address and
+    0x100 bytes behind rcx, rdx, r8 and r9. Beeps twice when armed and once when done."""
+    process = open_process(pid, PROCESS_ALL_ACCESS)
+    bases = module_bases(process)
+    address = resolve_address(bases, addr_text)
+    records = []
+
+    def on_execute(ctx):
+        registers = {r: ctx.get(r) for r in GENERAL_REGISTERS}
+        record = {
+            "registers": registers,
+            "return": read_u64(process, registers["Rsp"]),
+            "blobs": {r: read(process, registers[r], 0x100) for r in ("Rcx", "Rdx", "R8", "R9")},
+        }
+        records.append(record)
+        print("hit %d  rcx=%016x rdx=%016x r8=%016x r9=%016x  return %s" % (
+            len(records), registers["Rcx"], registers["Rdx"], registers["R8"], registers["R9"],
+            describe_address(bases, record["return"])), flush=True)
+
+    beep(2)
+    debug_session(pid, process, address, DR7_EXECUTE_SLOT0, seconds, on_execute)
+    beep(1)
+    with open(out, "wb") as f:
+        pickle.dump({"bases": bases, "records": records}, f)
+    print("hits: %d -> %s" % (len(records), out))
+
+
 def tolerance_arg(args, position):
     return float(args[position]) if len(args) > position else default_tolerance(float(args[3]))
 
@@ -447,6 +647,9 @@ if __name__ == "__main__":
         "dump": lambda: cmd_dump(int(args[1]), args[2], args[3], args[4]),
         "watch": lambda: cmd_watch(int(args[1]), args[2], args[3]),
         "trace_damage": lambda: cmd_trace_damage(int(args[1]), args[2], args[3], args[4]),
+        "ping_probe": lambda: cmd_ping_probe(int(args[1]), args[2]),
+        "ping_watch": lambda: cmd_ping_watch(int(args[1]), args[2]),
+        "trace_exec": lambda: cmd_trace_exec(int(args[1]), args[2], args[3], args[4]),
     }
     if not args or args[0] not in commands:
         print(__doc__)
