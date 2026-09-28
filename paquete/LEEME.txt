@@ -1,11 +1,15 @@
 EDF6 Enemy HP
 =============
 
-Tarjeta con la vida del ultimo enemigo que golpeaste: porcentaje, barra,
-vida actual / maxima, tu DPS de los ultimos 5 segundos (solo tu dano), el
-tiempo estimado para matarlo a ese ritmo y el ultimo golpe. Aparece al pegar,
-se va a los 5 segundos sin golpes (1,5 si lo mataste) y F3 la oculta o la
-vuelve a mostrar.
+Vida de los enemigos que vas golpeando. Cada uno tiene una tarjeta chica con
+porcentaje, barra, vida actual / maxima y tu ultimo golpe, hasta 6 en pantalla.
+Las kills quedan 4 segundos con cuanto tardaste y tu DPS promedio.
+
+Los enemigos excepcionales (mucha mas vida que lo que venis peleando, o que
+aguantan mas de 4 segundos) tienen una tarjeta grande arriba, con tu DPS
+(solo tu dano) y el tiempo estimado para matarlo.
+
+F3 oculta o vuelve a mostrar todo.
 
 REQUISITOS
 ----------
