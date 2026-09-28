@@ -887,7 +887,7 @@ DWORD WINAPI StartThread(LPVOID) {
 extern "C" BOOL __declspec(dllexport) EML6_Load(PluginInfo *pluginInfo) {
     pluginInfo->infoVersion = PluginInfo::MaxInfoVer;
     pluginInfo->name = "Enemy HP";
-    pluginInfo->version = PLUG_VER(1, 1, 0, 0);
+    pluginInfo->version = PLUG_VER(1, 2, 0, 0);
     static bool started = false;
     if (started) {
         return TRUE;
